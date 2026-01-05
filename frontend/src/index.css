@@ -1,0 +1,8 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Garante o fundo escuro padrão */
+body {
+  @apply bg-sentinel-dark text-gray-100;
+}
