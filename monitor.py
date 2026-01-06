@@ -1,111 +1,127 @@
-import win32com.client
-import requests
-import socket
-import uuid
+import os
+import subprocess
 import time
+import requests
+import wmi
+import urllib.parse
 
-# Endereço da sua API Django
-API_URL = "http://127.0.0.1:8000/api"
+# CONFIGURAÇÕES
+API_URL = "http://localhost:8000/api"
+HOSTNAME = os.environ.get('COMPUTERNAME', 'Unknown-PC')
+AGENT_ID = None
 
-def get_machine_info():
-    """Pega os dados do próprio computador automaticamente"""
-    hostname = socket.gethostname()
-    ip = socket.gethostbyname(hostname)
-    # Pega o MAC Address e formata bonitinho (00:1A:2B...)
-    mac_num = uuid.getnode()
-    mac = ':'.join(['{:02x}'.format((mac_num >> elements) & 0xff) for elements in range(0,2*6,2)][::-1])
-    return hostname, ip, mac
-
-def register_agent():
-    """Tenta registrar este computador na API ou recuperar o ID se já existir"""
-    hostname, ip, mac = get_machine_info()
-    
-    print(f"🔄 Conectando ao servidor Sentinel como: {hostname} ({mac})...")
-    
+def get_or_create_agent():
+    """ 
+    Verifica se o computador já está cadastrado no Dashboard. 
+    Se não estiver, cria o registro automaticamente.
+    """
+    global AGENT_ID
     try:
-        # 1. Verifica se o agente já existe (buscando pelo MAC)
-        response = requests.get(f"{API_URL}/agents/?mac_address={mac}")
-        existing = response.json()
+        # Busca a lista de agentes cadastrados
+        response = requests.get(f"{API_URL}/agents/", timeout=5)
+        agents = response.json()
         
-        if existing and len(existing) > 0:
-            agent_id = existing[0]['id']
-            print(f"✅ Agente identificado com sucesso (ID: {agent_id}).")
-            return agent_id
-            
-        # 2. Se não existe, cria um novo cadastro
-        payload = {
-            "hostname": hostname,
-            "ip_address": ip,
-            "mac_address": mac,
-            "is_online": True
+        # Procura se o hostname atual já existe
+        for a in agents:
+            if a['hostname'] == HOSTNAME:
+                print(f"✅ Agente '{HOSTNAME}' identificado (ID: {a['id']})")
+                return a['id']
+        
+        # Se não existir, envia um POST para criar
+        print(f"📝 Registrando novo agente: {HOSTNAME}...")
+        new_agent = {
+            "hostname": HOSTNAME,
+            "mac_address": "00:00:00:00:00:00", # MAC simplificado
+            "policy": "BLOCK_ALL"
         }
-        response = requests.post(f"{API_URL}/agents/", json=payload)
-        
-        if response.status_code == 201:
-            agent_id = response.json()['id']
-            print(f"✅ Novo Agente registrado no banco de dados (ID: {agent_id}).")
-            return agent_id
+        res = requests.post(f"{API_URL}/agents/", json=new_agent, timeout=5)
+        if res.status_code == 201:
+            new_id = res.json()['id']
+            print(f"✅ Registro concluído com sucesso (Novo ID: {new_id})")
+            return new_id
         else:
-            print(f"❌ Erro ao registrar: {response.text}")
+            print(f"❌ Falha ao registrar no Django: {res.text}")
             return None
-            
     except Exception as e:
-        print(f"❌ ERRO CRÍTICO: Não foi possível conectar na API em {API_URL}")
-        print(f"Detalhe: {e}")
+        print(f"🚨 Erro de conexão com o Servidor: {e}")
         return None
 
-def send_log(agent_id, device):
-    """Envia o alerta de USB para o banco de dados"""
-    if not agent_id: return
+def is_authorized(device_id):
+    """ Consulta se o dispositivo está na Whitelist """
+    try:
+        encoded_id = urllib.parse.quote(device_id, safe='')
+        url = f"{API_URL}/agents/check-auth/{encoded_id}/"
+        response = requests.get(url, timeout=3)
+        return response.status_code == 200
+    except:
+        return False
+
+def eject_usb(drive_letter):
+    """ Comando PowerShell para ejetar a unidade """
+    try:
+        cmd = f"powershell $drive = '{drive_letter}'; (New-Object -ComObject Shell.Application).Namespace(17).ParseName($drive).InvokeVerb('Eject')"
+        subprocess.run(cmd, shell=True)
+        return True
+    except:
+        return False
+
+def report_event(device_name, device_id, action):
+    """ Envia o log de detecção ou bloqueio para o Frontend """
+    if AGENT_ID is None:
+        print("⚠️ Log não enviado: Agente não está registrado no banco.")
+        return
 
     try:
-        payload = {
-            "agent": agent_id,
-            "device_name": getattr(device, "Caption", "Desconhecido"),
-            "device_id": getattr(device, "DeviceID", "N/A"),
-            "action_taken": "DETECTED" # Por enquanto apenas detectamos
+        data = {
+            "agent": AGENT_ID,
+            "device_name": device_name,
+            "device_id": device_id,
+            "action_taken": action
         }
-        
-        r = requests.post(f"{API_URL}/logs/", json=payload)
+        r = requests.post(f"{API_URL}/logs/", json=data, timeout=5)
         if r.status_code == 201:
-            print("📡 Log enviado para o servidor com sucesso!")
+            print(f"📡 EVENTO ENVIADO: {action} para o Dashboard!")
         else:
-            print(f"⚠️ Falha ao enviar log: {r.status_code}")
-            
+            print(f"❌ ERRO API: {r.status_code} - {r.text}")
     except Exception as e:
-        print(f"⚠️ Erro de conexão ao enviar log: {e}")
+        print(f"❌ FALHA NO REPORT: {e}")
 
-def monitor_usb(agent_id):
-    print("\n=== 🛡️ USB Sentinel Ativo e Vigilante ===")
-    print("Aguardando conexões USB...")
+def start_monitor():
+    global AGENT_ID
+    print("--- USB SENTINEL SOC ---")
     
-    wmi = win32com.client.GetObject("winmgmts:root\\cimv2")
-    query = "SELECT * FROM __InstanceCreationEvent WITHIN 1 WHERE TargetInstance ISA 'Win32_PnPEntity'"
-    watcher = wmi.ExecNotificationQuery(query)
+    # Tenta registrar o agente antes de começar
+    AGENT_ID = get_or_create_agent()
+    
+    if AGENT_ID is None:
+        print("🛑 O Agente não pôde ser inicializado. O Servidor Django está rodando?")
+        return
+
+    c = wmi.WMI()
+    watcher = c.watch_for(notification_type="Creation", wmi_class="Win32_DiskDrive", InterfaceType="USB")
+    
+    print(f"🛡️ MONITOR ATIVO: {HOSTNAME} | STATUS: PROTEGIDO")
+    print(">> Aguardando conexões USB...")
 
     while True:
-        try:
-            event = watcher.NextEvent()
-            device = event.TargetInstance
+        usb = watcher()
+        device_id = usb.DeviceID
+        device_name = usb.Caption
+
+        if is_authorized(device_id):
+            print(f"✅ PERMITIDO: {device_name}")
+            report_event(device_name, device_id, "DETECTED")
+        else:
+            print(f"🚫 BLOQUEADO: {device_name}")
+            # Identifica a letra do drive para ejetar
+            for partition in usb.associators("Win32_DiskDriveToDiskPartition"):
+                for logical_disk in partition.associators("Win32_LogicalDiskToPartition"):
+                    drive = logical_disk.DeviceID
+                    if eject_usb(drive):
+                        print(f"⚡ Unidade {drive} ejetada com sucesso!")
             
-            # Filtra apenas USBs
-            if "USB" in str(device.DeviceID):
-                print(f"\n🚨 [ALERTA] Novo USB Detectado!")
-                print(f"   Nome: {device.Caption}")
-                send_log(agent_id, device)
-                
-        except KeyboardInterrupt:
-            break
-        except Exception as e:
-            print(f"Erro no loop: {e}")
+            report_event(device_name, device_id, "BLOCKED")
+            time.sleep(2) 
 
 if __name__ == "__main__":
-    # Garante que temos requests instalado
-    try:
-        agent_id = register_agent()
-        if agent_id:
-            monitor_usb(agent_id)
-        else:
-            print("Encerrando: Falha na autenticação com o servidor.")
-    except NameError:
-        print("Erro: A biblioteca 'requests' não está instalada. Rode 'pip install requests'.")
+    start_monitor()

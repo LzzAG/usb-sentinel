@@ -27,3 +27,13 @@ class USBLog(models.Model):
 
     def __str__(self):
         return f"{self.device_name} em {self.agent.hostname}"
+
+# NOVA TABELA: Dispositivos Autorizados
+class WhitelistedDevice(models.Model):
+    device_id = models.CharField(max_length=255, unique=True)
+    device_name = models.CharField(max_length=255, null=True, blank=True)
+    added_at = models.DateTimeField(auto_now_add=True)
+    description = models.TextField(null=True, blank=True)
+
+    def __str__(self):
+        return f"Autorizado: {self.device_name or self.device_id}"
