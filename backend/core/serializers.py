@@ -1,15 +1,24 @@
 from rest_framework import serializers
-from .models import Agent, USBLog
+from .models import Agent, USBLog, WhitelistedDevice
 
 class AgentSerializer(serializers.ModelSerializer):
     class Meta:
         model = Agent
-        fields = ['hostname', 'ip_address', 'mac_address', 'status', 'policy_mode']
-        # 'status' e 'policy_mode' podem precisar de ajuste se usou nomes diferentes no model,
-        # vou ajustar para bater com o código que te passei antes:
-        fields = ['id', 'hostname', 'ip_address', 'mac_address', 'is_online', 'policy']
+        fields = ['id', 'hostname', 'ip_address', 'mac_address', 'is_online', 'last_seen', 'policy']
 
 class USBLogSerializer(serializers.ModelSerializer):
+    # Mostra o hostname do agente ao invés de apenas o ID no GET
+    agent_hostname = serializers.ReadOnlyField(source='agent.hostname')
+
     class Meta:
         model = USBLog
-        fields = ['agent', 'device_name', 'device_id', 'action_taken', 'timestamp']
+        fields = [
+            'id', 'agent', 'agent_hostname', 'device_name', 
+            'device_id', 'action_taken', 'username', 
+            'ip_address', 'timestamp'
+        ]
+
+class WhitelistedDeviceSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = WhitelistedDevice
+        fields = ['id', 'device_id', 'device_name', 'added_at', 'description']
