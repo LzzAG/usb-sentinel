@@ -17,14 +17,9 @@ class AgentViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get'], url_path='check-auth/(?P<hw_id>.+)')
     def check_auth(self, request, hw_id=None):
-        """
-        Endpoint customizado para o monitor.py verificar se um 
-        Hardware ID está na Whitelist.
-        """
         if not hw_id:
             return Response({"error": "Hardware ID não fornecido"}, status=status.HTTP_400_BAD_REQUEST)
         
-        # O hw_id vem codificado da URL, o Django já decodifica automaticamente
         is_authorized = WhitelistedDevice.objects.filter(device_id=hw_id).exists()
         
         if is_authorized:
@@ -33,9 +28,6 @@ class AgentViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get'])
     def dashboard_stats(self, request):
-        """
-        Retorna os KPIs para os cards do Frontend (Vite/React).
-        """
         total_agents = Agent.objects.count()
         active_agents = Agent.objects.filter(is_online=True).count()
         total_events = USBLog.objects.count()
@@ -48,28 +40,36 @@ class AgentViewSet(viewsets.ModelViewSet):
             "total_events": total_events,
             "blocked_events": blocked_events,
             "authorized_events": authorized_events,
-            "integrity_score": 98.5 # Valor simulado para o Dashboard
+            "integrity_score": 98.5
         })
 
 class USBLogViewSet(viewsets.ModelViewSet):
-    """
-    Gerencia os logs de auditoria. 
-    O Frontend consome este endpoint para a tabela de eventos.
-    """
     queryset = USBLog.objects.all().order_by('-timestamp')
     serializer_class = USBLogSerializer
 
 class WhitelistedDeviceViewSet(viewsets.ModelViewSet):
-    """
-    Gerencia os dispositivos autorizados.
-    O botão 'LIBERAR' do Frontend enviará um POST para aqui.
-    """
     queryset = WhitelistedDevice.objects.all()
     serializer_class = WhitelistedDeviceSerializer
 
     def create(self, request, *args, **kwargs):
-        # Lógica para evitar duplicados ao liberar do frontend
         device_id = request.data.get('device_id')
         if WhitelistedDevice.objects.filter(device_id=device_id).exists():
             return Response({"message": "Dispositivo já está na lista branca."}, status=status.HTTP_200_OK)
         return super().create(request, *args, **kwargs)
+
+    # --- NOVA AÇÃO: REVOGAR ---
+    @action(detail=False, methods=['post'], url_path='revoke')
+    def revoke_device(self, request):
+        """
+        Remove um dispositivo da Whitelist usando o device_id vindo do Frontend.
+        """
+        device_id = request.data.get('device_id')
+        if not device_id:
+            return Response({"error": "device_id é obrigatório"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            device = WhitelistedDevice.objects.get(device_id=device_id)
+            device.delete()
+            return Response({"message": "Acesso revogado com sucesso!"}, status=status.HTTP_200_OK)
+        except WhitelistedDevice.DoesNotExist:
+            return Response({"error": "Dispositivo não encontrado na Whitelist."}, status=status.HTTP_404_NOT_FOUND)
